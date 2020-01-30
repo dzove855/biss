@@ -39,16 +39,16 @@ prompt(){
     read -rp  "Continue?: Press Enter to continue or Ctrl+C to abort here"
 }
 
-dosu(){
-    (( cached )) || root_cache
+as_root() {
+    # Simple function to run a command as root using either 'sudo',
+    # 'doas' or 'su'. This also handles KISS' environment variables.
+    log "Using '${su:-su}'"
 
-    # Don't need to validate if we're already root
-    (( ${UID:-$(id -u)} )) || return 0
-
-    dosudo() { su "${drop_to:-root}" -c "$* >/dev/tty" >/dev/null; }
-
-    # We will only accept printf and not heredocs
-    printf '%s' "$pass" | dosudo "$@"
+    case $su in
+        *sudo) sudo -E -- "$@"                  ;;
+        *doas) doas -- "$@"                     ;;
+        *)     su -pc "$* <&3" 3<&0 </dev/tty   ;;
+    esac
 }
 
 regex_replace(){
