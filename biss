@@ -39,14 +39,6 @@ prompt(){
     read -rp  "Continue?: Press Enter to continue or Ctrl+C to abort here"
 }
 
-root_cache(){
-    IFS= read -rp "Password:" pass < /dev/tty && cached=1
-    printf '\n'
-
-    # Validate root pasword
-    dosu /bin/true
-}
-
 dosu(){
     (( cached )) || root_cache
 
@@ -91,7 +83,6 @@ pkg_find(){
     query=$1
     match=$2
 
-    shopt -s extglob
     shopt -s nullglob
 
     IFS=: read -a kiss_path <<<"$KISS_PATH"
@@ -110,4 +101,68 @@ pkg_find(){
         *)      printf '%s\n' "${matched_pkg[0]}" ;;
     esac
 }
+
+pkg_list(){
+    # print package version
+    shopt -s nullglob
+    
+    for pkg in "$sys_db"/*; do
+        [[ -d "$pkg" ]] && {
+            read -r version < "$pkg/version" || version=null
+            printf '%s %s\n' "${pkg##*/}" "$version"
+        }
+    done
+}
+
+pkg_sources(){
+    # Download any remote package sources. The existence of local
+    # files is also checked.
+    log "$1" "Downloading sources"
+
+    # Store each downloaded source in a directory named after the
+    # package it belongs to. This avoid conflicts between two packages
+    # having a source of the same name.
+    mkdir -p "$src_dir/$1" && cd "$src_dir/$1"
+
+    repo_dir=$(pkg_find "$1")
+    
+    while read -r src dest || [[ $src ]]; do
+        # remote src (cached)
+        if [[ -f "${src##*/}" ]]; then
+            log "$1" "Found cached source '${src##*/}'"
+
+        # remite git repository
+        elif [[ "$src" =~ ^git\+(.*)$ ]]; then
+
+            [[ "$2" ]] && continue
+
+            mkdir -p "$mak_dir/$1/$dest"
+
+            (
+                repo_src="${BASH_REMATCH[1]}"
+                [[ "${src##*#*}" ]] && shallow=--depth=1
+
+                cd "$mak_dir/$1/$dest" &&
+                    git clone "${shallow:---}" "${repo_src%#*}" .
+
+            ) || die "$1" "Failed to clone $src"
+
+        # remote source
+        elif [[ "$src" == *"://"* ]]; then
+            curl "$src" -fLo "${src##*/}" || {
+                rm -f "${src##*/}"
+                die "$1" "Failed to download $src"
+            }
+
+        # local source
+        elif [[ -f "$repo_dir/$src" ]]; then
+            log "$1" "Found local file '$src'"
+
+        else
+            die "$1" "No local file '$src'"
+        fi
+
+    done < "$repo_dir/sources"
+}
+
 
