@@ -165,4 +165,257 @@ pkg_sources(){
     done < "$repo_dir/sources"
 }
 
+pkg_extract(){
+    # Extract all source archives to the build directory and copy over
+    # any local repository files.
+    log "$1" "Extracting sources"
+
+    repo_dir=$(pkg_find "$1")
+
+    while read -r src dest || [[ "$src" ]]; do
+        mkdir -p "$mak_dir/$1/$dest" && cd "$mak_dir/$1/$dest"
+
+        case $src in
+            # Git repository with supplied commit hash.
+            git+*\#*)
+                log "Checking out ${src##*#}"
+
+                git reset --hard "${src##*#}" ||
+                    die "Commit hash ${src##*#} doesn't exist"
+            ;;
+
+            # Git repository.
+            git+*)
+                continue
+            ;;
+
+            # Only 'tar' archives are currently supported for extraction.
+            # Any other file-types are simply copied to '$mak_dir' which
+            # allows for manual extraction.
+            *://*.tar|*://*.tar.??|*://*.tar.???|*://*.tar.????|*://*.tgz)
+                tar xf "$src_dir/$1/${src##*/}" --strip-components 1 ||
+                    die "$1" "Couldn't extract ${src##*/}"
+            ;;
+
+            *)
+                # Local file.
+                if [[ -f "$repo_dir/$src" ]]; then
+                    cp -f "$repo_dir/$src" .
+
+                # Remote file.
+                elif [[ -f "$src_dir/$1/${src##*/}" ]]; then
+                    cp -f "$src_dir/$1/${src##*/}" .
+
+                else
+                    die "$1" "Local file $src not found"
+                fi
+            ;;
+        esac
+
+    done  < "$repo_dir/sources"
+
+}
+
+pkg_depends(){
+    # Resolve all dependencies and generate an ordered list.
+    repo_dir=$(pkg_find "$1")
+
+    # This does a depth-first search. The deepest dependencies are
+    # listed first and then the parents in reverse order.
+    contains "$deps" "$1" || {
+        # Filter out non-explicit, aleady installed dependencies.
+        # Only filter installed if called from 'pkg_build()'.
+        [[ "$pkg_build" ]] && [[ -z "$2" ]] &&
+            (pkg_list "$1" >/dev/null) && return
+
+        # Recurse through the dependencies of the child packages.
+        while read -r dep _ || [[ "$dep" ]]; do
+            [[ "${dep##\#*}" ]] && pkg_depends "$dep"
+        done 2>/dev/null < "$repo_dir/depends" ||:
+
+        # After child dependencies are added to the list,
+        # add the package which depends on them.
+        [[ "$2" = explicit ]] || deps="$deps $1 "
+    }
+
+}
+
+pkg_strip(){
+    # Strip package binaries and libraries. This saves space on the
+    # system as well as on the tar-balls we ship for installation.
+
+    # Package has stripping disabled, stop here.
+    [ -f "$mak_dir/$pkg/nostrip" ] && return
+
+    log "$1" "Stripping binaries and libraries"
+
+
+    shopt -s nullglob
+    shopt -s globstar    
+    shopt -s dotglob
+
+    for file in "$pkg_dir/$1"/**; do
+        if [[ -f "$file" ]]; then
+            case $(readelf -h "$file" 2>/dev/null) in
+                *" DYN "*)  strip_opt=unneeded ;;
+                *" EXEC "*) strip_opt=all ;;
+                *" REL "*)  strip_opt=debug ;;
+                *) continue
+            esac
+
+            # Suppress errors here as some binaries and libraries may
+            # fail to strip. This is OK.
+            strip "--strip-$strip_opt" "$file" 2>/dev/null ||:
+        fi
+
+    done
+}
+
+pkg_fixdeps(){
+    # Dynamically look for missing runtime dependencies by checking
+    # each binary and library with 'ldd'. This catches any extra
+    # libraries and or dependencies pulled in by the package's
+    # build suite.
+    log "$1" "Checking for missing dependencies"
+
+    # Go to the directory containing the built package to
+    # simplify path building.
+    cd "$pkg_dir/$1/$pkg_db/$1"
+
+    # Make a copy of the depends file if it exists to have a
+    # reference to 'diff' against.
+    [[ -f depends ]] && cp -f depends depends-copy
+
+    # Generate a list of all installed manifests.
+    pkg_name=$1
+    
+    shopt -s nullglob
+    manifest_list=("$sys_db/"*/manifest)
+
+    shopt -s nullglob
+    shopt -s globstar
+
+    for file in "$pkg_dir/$pkg_name"/**; do
+        # Run 'ldd' on the file and parse each line. The code
+        # then checks to see which packages own the linked
+        # libraries and it prints the result.
+        ldd "$file" 2>/dev/null | while read -r dep; do
+            # Skip lines containing 'ldd'.
+            [[ "${dep##*ldd*}" ]] || continue
+
+            # Extract the file path from 'ldd' output.
+            : ${dep#* => }
+            : ${_% *}
+
+            # Figure out which package owns the file.
+            dep=$("$grep" -lFx "${_##$KISS_ROOT}" "$@")
+
+            # Extract package name from 'grep' match.
+            : ${dep%/*}
+            : ${_##*/}
+
+            dep="$_"
+
+            case $dep in
+                # Skip listing these packages as dependencies.
+                musl|gcc|${PWD##*/}|"") ;;
+                *) printf '%s\n' "$dep" ;;
+            esac
+        done ||:
+    done >> depends-copy
+
+    # to remove the sort command, we will use associative array. 
+    # Not sure i it will work well or faster
+    # XXX: actually we could use normal array and use the function contains
+    local -A depends_new
+    while read -ra entry; do
+        [[ -z "${mapfile_new["${entry[0]}"]}" ]] && {
+            mapfile_new["${entry[0]}"]="${entry[*]:1}"
+        }
+    done < depends-copy
+
+    for entry in "${!depends_new[@]}"; do
+        printf "%s %s\n" "$entry" "${depends_new["$entry"]}"
+    done >> depends-new
+
+    # XXX: we could replace diff also, but we will keep it for the moment
+    # Display a 'diff' of the new dependencies agaisnt
+    # the old ones. '-N' treats non-existent files as blank.
+    diff -N depends depends-new ||:
+
+    # Do some clean up as this required a few temporary files.
+    mv -f depends-new depends
+    rm -f depends-copy
+}
+
+pkg_junk(){
+    # Optionally remove "junk" files from packages. This includes 'info'
+    # files, 'man' pages, gettext files, etc. This is configurable by the
+    # user.
+    #
+    # This function runs as a sub-shell to avoid having to 'cd' back to the
+    # prior directory before being able to continue.
+    cd "$pkg_dir/$1"
+
+    # Default list of directories and their contents to be removed from
+    # built packages. This default assumes a prefix of '/usr' though the
+    # user can further configure it to search whatever paths they desire.
+    #
+    # TODO: This could be nicer as could the interface to it. Something
+    #       which allows for the addition/subtraction from the list
+    #       would be desirable.
+    rm=usr/share/doc:usr/share/gtk-doc:usr/share/info:usr/share/polkit-1
+    rm=$rm:usr/share/gettext:usr/share/locale:usr/share/bash-completion
+    rm=$rm:etc/bash_completion.d:usr/share/applications
+    rm=$rm:usr/share/zsh/site-functions:usr/share/zsh/vendor-completions
+
+    IFS=: read -a junk_list <<<"${KISS_RM:-$rm}"
+    junk_list+=("usr/lib/charset.alias")    
+
+    # Loop over each junk entry and delete it if it exists.
+    for junk in "${junk_list[@]}"; do
+        [[ -e "./$junk" ]] && rm -rf "./$junk" &&
+            log "${PWD##*/}" "Removed $junk"
+    done ||:
+}
+
+pkg_manifest(){
+    # Generate the package's manifest file. This is a list of each file
+    # and directory inside the package. The file is used when uninstalling
+    # packages, checking for package conflicts and for general debugging.
+    log "$1" "Generating manifest"
+
+    # This funcion runs as a sub-shell to avoid having to 'cd' back to the
+    # prior directory before being able to continue.
+    cd "$pkg_dir/$1"
+
+    shopt -s nullglob
+    shopt -s globstar
+    shopt -s dotglob
+        
+    for content in ./**; do
+        [[ -d "$content" ]] && content_is_dir+=("${content#.}")
+        [[ -f "$content" ]] && content_is_file+=("${content#.}")
+    done
+
+    printf '%s\n' "${content_is_file[@]}" > "$pkg_dir/$1/$pkg_db/$1/manifest"
+    printf '%s\n' "${content_is_dir[@]}" >> "$pkg_dir/$1/$pkg_db/$1/manifest"
+
+}
+
+pkg_tar() {
+    # Create a tar-ball from the built package's files.
+    # This tar-ball also contains the package's database entry.
+    log "$1" "Creating tar-ball"
+
+    # Read the version information to name the package.
+    read -r version release < "$(pkg_find "$1")/version"
+
+    # Create a tar-ball from the contents of the built package.
+    tar zpcf "$bin_dir/$1#$version-$release.tar.gz" -C "$pkg_dir/$1" . ||
+        die "$1" "Failed to create tar-ball"
+
+    log "$1" "Successfully created tar-ball"
+}
+
 
