@@ -369,7 +369,7 @@ pkg_junk(){
     rm=$rm:etc/bash_completion.d:usr/share/applications
     rm=$rm:usr/share/zsh/site-functions:usr/share/zsh/vendor-completions
 
-    IFS=: read -a junk_list <<<"${KISS_RM:-$rm}"
+    IFS=: read -ra junk_list <<<"${KISS_RM:-$rm}"
     junk_list+=("usr/lib/charset.alias")    
 
     # Loop over each junk entry and delete it if it exists.
