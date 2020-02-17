@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# TODO: Reimplement tee in pure bash
 # TODO: Replace all set XX in an array list (if possible)
 # TODO: Replace all sed with mapfile and substitution
 # TODO: We could also replace grep with mapfile and bash rematch (Note: The performance can be bad as hell by doing this)
@@ -67,6 +66,14 @@ regex_replace(){
     # Escape chars for using in sed
     printf -v sea '%q' "$1"
     printf -v rep '%q' "$2"
+}
+
+tee(){
+    # We will not check for $1 since i hope everyone knows the basic tee
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+        printf '%s\n' "$line" > "$1"
+    done
 }
 
 pkg_lint(){

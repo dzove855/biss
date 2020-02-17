@@ -1,7 +1,6 @@
 # BISS - STILL IN WORK
 # Use on your own risk - It's not really tested yet.
 
-TODO: Reimplement tee in pure bash
 TODO: Replace all set XX in an array list (if possible)
 TODO: Replace all sed with mapfile and substitution
 TODO: We could also replace grep with mapfile and bash rematch (Note: The performance can be bad as hell by doing this)
